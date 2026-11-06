@@ -57,6 +57,10 @@ struct background_removal_filter : public filter_data, public std::enable_shared
 	cv::Mat backgroundMask;
 	cv::Mat lastBackgroundMask;
 	cv::Mat lastImageBGRA;
+	cv::Mat workBGRA;     // tick-private frame buffer, swapped with inputBGRA (single writer)
+	cv::Mat maskScratch;  // model-resolution mask scratch (compare / 255-img)
+	cv::Mat maskFull;     // full-resolution mask scratch, holds the live mask at the end of a tick
+	cv::Mat maskBin;      // second full-resolution scratch, swapped with maskFull
 	float temporalSmoothFactor = 0.0f;
 	float imageSimilarityThreshold = 35.0f;
 	bool enableImageSimilarity = true;
@@ -79,8 +83,15 @@ struct background_removal_filter : public filter_data, public std::enable_shared
 	uint64_t backgroundImageTextureVersion = 0;
 	std::mutex backgroundImageLock;
 
-	gs_effect_t *effect;
-	gs_effect_t *kawaseBlurEffect;
+	gs_effect_t *effect = nullptr;
+	gs_effect_t *kawaseBlurEffect = nullptr;
+
+	gs_texture_t *alphaTexture = nullptr;
+	uint32_t alphaTextureWidth = 0;
+	uint32_t alphaTextureHeight = 0;
+	gs_texture_t *blurredTexture = nullptr;
+	uint32_t blurredTextureWidth = 0;
+	uint32_t blurredTextureHeight = 0;
 
 	std::mutex modelMutex;
 
@@ -419,15 +430,19 @@ void background_filter_update(void *data, obs_data_t *settings)
 
 	obs_enter_graphics();
 
-	char *effect_path = obs_module_file(EFFECT_PATH);
-	gs_effect_destroy(tf->effect);
-	tf->effect = gs_effect_create_from_file(effect_path, NULL);
-	bfree(effect_path);
+	// Effects are stateless: load once and keep them across settings changes (a slider step
+	// would otherwise destroy and recompile both shaders). background_filter_destroy frees them.
+	if (!tf->effect) {
+		char *effect_path = obs_module_file(EFFECT_PATH);
+		tf->effect = gs_effect_create_from_file(effect_path, NULL);
+		bfree(effect_path);
+	}
 
-	char *kawaseBlurEffectPath = obs_module_file(KAWASE_BLUR_EFFECT_PATH);
-	gs_effect_destroy(tf->kawaseBlurEffect);
-	tf->kawaseBlurEffect = gs_effect_create_from_file(kawaseBlurEffectPath, NULL);
-	bfree(kawaseBlurEffectPath);
+	if (!tf->kawaseBlurEffect) {
+		char *kawaseBlurEffectPath = obs_module_file(KAWASE_BLUR_EFFECT_PATH);
+		tf->kawaseBlurEffect = gs_effect_create_from_file(kawaseBlurEffectPath, NULL);
+		bfree(kawaseBlurEffectPath);
+	}
 
 	obs_leave_graphics();
 
@@ -542,6 +557,8 @@ void background_filter_destroy(void *data)
 			gs_effect_destroy((*ptr)->effect);
 			gs_effect_destroy((*ptr)->kawaseBlurEffect);
 			gs_texture_destroy((*ptr)->backgroundImageTexture);
+			gs_texture_destroy((*ptr)->alphaTexture);
+			gs_texture_destroy((*ptr)->blurredTexture);
 			obs_leave_graphics();
 		}
 		// Delete the pointer to shared_ptr
@@ -563,10 +580,12 @@ static void processImageForBackground(struct background_removal_filter *tf, cons
 	if (tf->enableThreshold) {
 		// We need to make tf->threshold (float [0,1]) be in that range
 		const uint8_t threshold_value = (uint8_t)(tf->threshold * 255.0f);
-		backgroundMask = outputImage < threshold_value;
+		cv::compare(outputImage, threshold_value, tf->maskScratch, cv::CMP_LT);
 	} else {
-		backgroundMask = 255 - outputImage;
+		cv::subtract(255, outputImage, tf->maskScratch);
 	}
+	// Shallow: the caller owns the result only until the next call, the buffer is reused.
+	backgroundMask = tf->maskScratch;
 }
 
 void background_filter_video_tick(void *data, float seconds)
@@ -597,7 +616,8 @@ void background_filter_video_tick(void *data, float seconds)
 		return;
 	}
 
-	cv::Mat imageBGRA;
+	// Swapped in under the lock: this thread is the only writer of workBGRA afterwards.
+	cv::Mat &imageBGRA = tf->workBGRA;
 	{
 		std::unique_lock<std::mutex> lock(tf->inputBGRALock, std::try_to_lock);
 		if (!lock.owns_lock()) {
@@ -608,7 +628,7 @@ void background_filter_video_tick(void *data, float seconds)
 			// No data to process
 			return;
 		}
-		imageBGRA = tf->inputBGRA.clone();
+		std::swap(tf->inputBGRA, imageBGRA);
 	}
 
 	if (tf->enableImageSimilarity) {
@@ -621,7 +641,7 @@ void background_filter_video_tick(void *data, float seconds)
 				return;
 			}
 		}
-		tf->lastImageBGRA = imageBGRA.clone();
+		imageBGRA.copyTo(tf->lastImageBGRA);
 	}
 
 	if (tf->backgroundMask.empty()) {
@@ -667,7 +687,7 @@ void background_filter_video_tick(void *data, float seconds)
 						1.0 - temporalSmoothFactor, 0.0, backgroundMask);
 			}
 
-			tf->lastBackgroundMask = backgroundMask.clone();
+			backgroundMask.copyTo(tf->lastBackgroundMask);
 
 			// Contour processing
 			// Only applicable if we are thresholding (and get a binary image)
@@ -695,12 +715,16 @@ void background_filter_video_tick(void *data, float seconds)
 				}
 
 				// Resize the size of the mask back to the size of the original input.
-				cv::resize(backgroundMask, backgroundMask, imageBGRA.size());
+				// maskFull/maskBin are reused, so the resize writes into existing storage.
+				cv::resize(backgroundMask, tf->maskFull, imageBGRA.size());
+				backgroundMask = tf->maskFull;
 
 				// Additional contour processing at full resolution
 				if (tf->smoothContour > 0.0) {
 					// If the mask was smoothed, apply a threshold to get a binary mask
-					backgroundMask = backgroundMask > 128;
+					cv::compare(backgroundMask, 128, tf->maskBin, cv::CMP_GT);
+					std::swap(tf->maskFull, tf->maskBin);
+					backgroundMask = tf->maskFull;
 				}
 
 				// Expand or shrink the mask
@@ -811,7 +835,18 @@ static gs_texture_t *blur_background(std::shared_ptr<background_removal_filter> 
 	if (tf->blurBackground == 0 || !tf->kawaseBlurEffect) {
 		return nullptr;
 	}
-	gs_texture_t *blurredTexture = gs_texture_create(width, height, GS_BGRA, 1, nullptr, 0);
+	// Reused across frames; gs_copy_texture needs a plain (non-dynamic) texture as its target.
+	if (!tf->blurredTexture || tf->blurredTextureWidth != width || tf->blurredTextureHeight != height) {
+		gs_texture_destroy(tf->blurredTexture);
+		tf->blurredTexture = gs_texture_create(width, height, GS_BGRA, 1, nullptr, 0);
+		tf->blurredTextureWidth = width;
+		tf->blurredTextureHeight = height;
+	}
+	gs_texture_t *blurredTexture = tf->blurredTexture;
+	if (!blurredTexture) {
+		obs_log(LOG_ERROR, "Failed to create blur texture");
+		return nullptr;
+	}
 	gs_copy_texture(blurredTexture, gs_texrender_get_texture(tf->texrender));
 	gs_eparam_t *image = gs_effect_get_param_by_name(tf->kawaseBlurEffect, "image");
 	gs_eparam_t *focalmask = gs_effect_get_param_by_name(tf->kawaseBlurEffect, "focalmask");
@@ -905,8 +940,18 @@ void background_filter_video_render(void *data, gs_effect_t *_effect)
 			return;
 		}
 
-		alphaTexture = gs_texture_create(tf->backgroundMask.cols, tf->backgroundMask.rows, GS_R8, 1,
-						 (const uint8_t **)&tf->backgroundMask.data, 0);
+		// Reused dynamic texture: one upload per frame instead of create/destroy.
+		const cv::Mat &mask = tf->backgroundMask;
+		const uint32_t maskWidth = (uint32_t)mask.cols;
+		const uint32_t maskHeight = (uint32_t)mask.rows;
+		if (!tf->alphaTexture || tf->alphaTextureWidth != maskWidth ||
+		    tf->alphaTextureHeight != maskHeight) {
+			gs_texture_destroy(tf->alphaTexture);
+			tf->alphaTexture = gs_texture_create(maskWidth, maskHeight, GS_R8, 1, nullptr, GS_DYNAMIC);
+			tf->alphaTextureWidth = maskWidth;
+			tf->alphaTextureHeight = maskHeight;
+		}
+		alphaTexture = tf->alphaTexture;
 
 		if (!alphaTexture) {
 			obs_log(LOG_ERROR, "Failed to create alpha texture");
@@ -914,6 +959,14 @@ void background_filter_video_render(void *data, gs_effect_t *_effect)
 				obs_source_skip_video_filter(tf->source);
 			}
 			return;
+		}
+
+		if (mask.isContinuous()) {
+			gs_texture_set_image(alphaTexture, mask.data, (uint32_t)mask.cols, false);
+		} else {
+			cv::Mat continuous;
+			mask.copyTo(continuous);
+			gs_texture_set_image(alphaTexture, continuous.data, (uint32_t)continuous.cols, false);
 		}
 	}
 
@@ -927,8 +980,6 @@ void background_filter_video_render(void *data, gs_effect_t *_effect)
 		if (tf->source) {
 			obs_source_skip_video_filter(tf->source);
 		}
-		gs_texture_destroy(alphaTexture);
-		gs_texture_destroy(blurredTexture);
 		return;
 	}
 
@@ -956,7 +1007,4 @@ void background_filter_video_render(void *data, gs_effect_t *_effect)
 	obs_source_process_filter_tech_end(tf->source, tf->effect, 0, 0, techName);
 
 	gs_blend_state_pop();
-
-	gs_texture_destroy(alphaTexture);
-	gs_texture_destroy(blurredTexture);
 }

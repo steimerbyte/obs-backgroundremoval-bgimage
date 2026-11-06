@@ -98,6 +98,14 @@ int createOrtSession(filter_data *tf)
 
 	tf->model->populateInputOutputNames(tf->session, tf->inputNames, tf->outputNames);
 
+	// Cache the char* names for Ort::Run once per session instead of per frame.
+	tf->rawInputNames.clear();
+	for (auto &name : tf->inputNames)
+		tf->rawInputNames.push_back(name.get());
+	tf->rawOutputNames.clear();
+	for (auto &name : tf->outputNames)
+		tf->rawOutputNames.push_back(name.get());
+
 	if (!tf->model->populateInputOutputShapes(tf->session, tf->inputDims, tf->outputDims)) {
 		obs_log(LOG_ERROR, "Unable to get model input and output shapes");
 		return OBS_BGREMOVAL_ORT_SESSION_ERROR_INVALID_INPUT_OUTPUT;
@@ -136,27 +144,25 @@ bool runFilterModelInference(filter_data *tf, const cv::Mat &imageBGRA, cv::Mat 
 		return false;
 	}
 
-	// To RGB
-	cv::Mat imageRGB;
-	cv::cvtColor(imageBGRA, imageRGB, cv::COLOR_BGRA2RGB);
-
 	// Resize to network input size
 	uint32_t inputWidth, inputHeight;
 	tf->model->getNetworkInputSize(tf->inputDims, inputWidth, inputHeight);
 
-	cv::Mat resizedImageRGB;
-	cv::resize(imageRGB, resizedImageRGB, cv::Size(inputWidth, inputHeight));
+	// Resize before the BGRA->RGB conversion: resize works per channel, so the result is
+	// bit-identical, but the full-resolution channel permutation and its buffer are gone.
+	cv::resize(imageBGRA, tf->inferenceBGRA, cv::Size(inputWidth, inputHeight), 0, 0, cv::INTER_LINEAR);
+	cv::cvtColor(tf->inferenceBGRA, tf->inferenceRGB, cv::COLOR_BGRA2RGB);
 
-	// Prepare input to nework
-	cv::Mat resizedImage, preprocessedImage;
-	resizedImageRGB.convertTo(resizedImage, CV_32F);
+	// Prepare input to network. These Mats persist, so nothing is allocated per frame.
+	tf->inferenceRGB.convertTo(tf->inferenceF32, CV_32F);
 
-	tf->model->prepareInputToNetwork(resizedImage, preprocessedImage);
+	tf->model->prepareInputToNetwork(tf->inferenceF32, tf->preprocessed);
 
-	tf->model->loadInputToTensor(preprocessedImage, inputWidth, inputHeight, tf->inputTensorValues);
+	tf->model->loadInputToTensor(tf->preprocessed, inputWidth, inputHeight, tf->inputTensorValues);
 
 	// Run network inference
-	tf->model->runNetworkInference(tf->session, tf->inputNames, tf->outputNames, tf->inputTensor, tf->outputTensor);
+	tf->model->runNetworkInference(tf->session, tf->rawInputNames, tf->rawOutputNames, tf->inputTensor,
+				       tf->outputTensor);
 
 	// Get output
 	// Map network output to cv::Mat

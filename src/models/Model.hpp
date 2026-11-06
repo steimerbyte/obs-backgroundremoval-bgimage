@@ -230,6 +230,8 @@ public:
 
 	virtual void prepareInputToNetwork(cv::Mat &resizedImage, cv::Mat &preprocessedImage)
 	{
+		// Keep the MatExpr form: cv::divide rounds differently by 1 ulp. Writing into an
+		// already-sized preprocessedImage makes this allocate nothing.
 		preprocessedImage = resizedImage / 255.0;
 	}
 
@@ -261,8 +263,8 @@ public:
 	virtual void assignOutputToInput(std::vector<std::vector<float>> &, std::vector<std::vector<float>> &) {}
 
 	virtual void runNetworkInference(const std::unique_ptr<Ort::Session> &session,
-					 const std::vector<Ort::AllocatedStringPtr> &inputNames,
-					 const std::vector<Ort::AllocatedStringPtr> &outputNames,
+					 const std::vector<const char *> &inputNames,
+					 const std::vector<const char *> &outputNames,
 					 const std::vector<Ort::Value> &inputTensor,
 					 std::vector<Ort::Value> &outputTensor)
 	{
@@ -272,18 +274,8 @@ public:
 			return;
 		}
 
-		std::vector<const char *> rawInputNames;
-		for (auto &inputName : inputNames) {
-			rawInputNames.push_back(inputName.get());
-		}
-
-		std::vector<const char *> rawOutputNames;
-		for (auto &outputName : outputNames) {
-			rawOutputNames.push_back(outputName.get());
-		}
-
-		session->Run(Ort::RunOptions{nullptr}, rawInputNames.data(), inputTensor.data(), inputNames.size(),
-			     rawOutputNames.data(), outputTensor.data(), outputNames.size());
+		session->Run(Ort::RunOptions{nullptr}, inputNames.data(), inputTensor.data(), inputNames.size(),
+			     outputNames.data(), outputTensor.data(), outputNames.size());
 	}
 };
 

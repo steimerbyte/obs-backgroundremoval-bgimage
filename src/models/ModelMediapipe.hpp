@@ -10,7 +10,8 @@
 
 class ModelMediaPipe : public Model {
 private:
-	/* data */
+	cv::Mat outputChannel1;
+
 public:
 	ModelMediaPipe(/* args */) {}
 	~ModelMediaPipe() {}
@@ -27,11 +28,10 @@ public:
 
 	virtual void postprocessOutput(cv::Mat &outputImage)
 	{
-		// take 2nd channel
-		std::vector<cv::Mat> outputImageSplit;
-		cv::split(outputImage, outputImageSplit);
+		// take 2nd channel, into a reused buffer (cv::split would allocate two Mats)
+		cv::extractChannel(outputImage, outputChannel1, 1);
 
-		outputImage = outputImageSplit[1];
+		outputImage = outputChannel1;
 	}
 };
 

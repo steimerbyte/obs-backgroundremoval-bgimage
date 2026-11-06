@@ -31,6 +31,7 @@ struct filter_data : public ORTModelData, public std::enable_shared_from_this<fi
 	gs_stagesurf_t *stagesurface;
 
 	cv::Mat inputBGRA;
+	cv::Mat captureBGRA; // reused staging buffer for the stage surface copy, swapped with inputBGRA
 
 	std::atomic<bool> isDisabled{false};
 
