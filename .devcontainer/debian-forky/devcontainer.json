@@ -1,0 +1,29 @@
+{
+  "$schema": "https://raw.githubusercontent.com/devcontainers/spec/main/schemas/devContainer.schema.json",
+  "name": "Debian Forky",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "remoteUser": "vscode",
+  "updateRemoteUserUID": true,
+  "containerEnv": {
+    "PLUGIN_BUILD_DIR": "/home/vscode/obs-backgroundremoval-build"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "editorconfig.editorconfig",
+        "ms-vscode.cmake-tools",
+        "ms-vscode.cpp-devtools",
+        "ms-vscode.cpptools-extension-pack"
+      ],
+      "settings": {
+        "cmake.useCMakePresets": "never",
+        "cmake.buildDirectory": "/home/vscode/obs-backgroundremoval-build/build",
+        "cmake.configureSettings": {
+          "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+        }
+      }
+    }
+  }
+}

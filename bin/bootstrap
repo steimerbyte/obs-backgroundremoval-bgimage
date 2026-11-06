@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+
+# SPDX-FileCopyrightText: 2026 Kaito Udagawa <umireon@kaito.tokyo>
+#
+# SPDX-License-Identifier: Apache-2.0
+
+debian_forky() {
+  apt-get update
+  apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    cmake \
+    curl \
+    file \
+    git \
+    libcurl4-openssl-dev \
+    libobs-dev \
+    libonnxruntime-dev \
+    libopencv-dev \
+    ninja-build \
+    tar \
+    unzip \
+    zip
+}
+
+ubuntu_resolute() {
+  apt-get update
+  apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    cmake \
+    curl \
+    file \
+    git \
+    libcurl4-openssl-dev \
+    libobs-dev \
+    libonnxruntime-dev \
+    libopencv-dev \
+    ninja-build \
+    tar \
+    unzip \
+    zip
+}
+
+macos() {
+  brew install ccache pkg-config python xcbeautify
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  set -euo pipefail
+  shopt -s nullglob
+
+  [[ -f /etc/os-release ]] && . /etc/os-release
+  if [[ "$(uname -s)" == Darwin ]]; then
+    macos
+  elif [[ "$ID" =~ ^(debian|ubuntu)$ ]] && declare -f "${ID}_$VERSION_CODENAME"; then
+    "${ID}_$VERSION_CODENAME"
+  else
+    printf 'ERROR: Your platform is not supported. Exiting...\n' >&2
+    exit 1
+  fi
+fi

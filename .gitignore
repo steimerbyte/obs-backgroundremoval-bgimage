@@ -1,0 +1,15 @@
+.DS_Store
+.venv/
+.vscode/
+/.ccache*/
+/.deps_vendor/
+/.deps/
+/.vcpkg_archives/
+/*_installed/
+/build/
+/build_*/
+/obs-studio/
+/onnxruntime/
+/release/
+/vcpkg/
+/*_lock.txt
