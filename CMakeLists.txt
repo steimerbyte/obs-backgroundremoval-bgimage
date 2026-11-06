@@ -150,6 +150,10 @@ block(PROPAGATE OpenCV_FOUND)
   if(TARGET opencv_geometry AND NOT TARGET OpenCV::opencv_geometry)
     add_library(OpenCV::opencv_geometry ALIAS opencv_geometry)
   endif()
+
+  if(TARGET opencv_imgcodecs AND NOT TARGET OpenCV::opencv_imgcodecs)
+    add_library(OpenCV::opencv_imgcodecs ALIAS opencv_imgcodecs)
+  endif()
 endblock()
 
 block(PROPAGATE onnxruntime_FOUND)
@@ -202,6 +206,7 @@ target_link_libraries(
     OpenCV::opencv_core
     OpenCV::opencv_imgproc
     $<$<TARGET_EXISTS:OpenCV::opencv_geometry>:OpenCV::opencv_geometry>
+    $<$<TARGET_EXISTS:OpenCV::opencv_imgcodecs>:OpenCV::opencv_imgcodecs>
 )
 
 target_sources(

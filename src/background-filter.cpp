@@ -17,8 +17,10 @@
 #include <opencv2/geometry.hpp>
 #endif
 
+#include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 
+#include <cmath>
 #include <numeric>
 #include <memory>
 #include <exception>
@@ -64,6 +66,15 @@ struct background_removal_filter : public filter_data, public std::enable_shared
 	bool enableFocalBlur = false;
 	float blurFocusPoint = 0.1f;
 	float blurFocusDepth = 0.1f;
+
+	std::string backgroundImagePath;
+	cv::Mat backgroundImage;
+	gs_texture_t *backgroundImageTexture = nullptr;
+	uint32_t backgroundImageTextureWidth = 0;
+	uint32_t backgroundImageTextureHeight = 0;
+	uint64_t backgroundImageVersion = 0;
+	uint64_t backgroundImageTextureVersion = 0;
+	std::mutex backgroundImageLock;
 
 	gs_effect_t *effect;
 	gs_effect_t *kawaseBlurEffect;
@@ -220,6 +231,10 @@ obs_properties_t *background_filter_properties(void *data)
 	obs_properties_add_int_slider(props, "blur_background", obs_module_text("BlurBackgroundFactor0NoBlurUseColor"),
 				      0, 20, 1);
 
+	/* Replaces the background with a still image (takes precedence over blur) */
+	obs_properties_add_path(props, "background_image", obs_module_text("BackgroundImage"), OBS_PATH_FILE,
+				"Image files (*.png *.jpg *.jpeg *.bmp *.webp);;All files (*.*)", nullptr);
+
 	obs_property_t *p_enable_focal_blur =
 		obs_properties_add_bool(props, "enable_focal_blur", obs_module_text("EnableFocalBlur"));
 	obs_property_set_modified_callback(p_enable_focal_blur, enable_focal_blur);
@@ -268,6 +283,7 @@ void background_filter_defaults(obs_data_t *settings)
 	obs_data_set_default_string(settings, "model_select", MODEL_MEDIAPIPE);
 	obs_data_set_default_int(settings, "mask_every_x_frames", 1);
 	obs_data_set_default_int(settings, "blur_background", 0);
+	obs_data_set_default_string(settings, "background_image", "");
 	obs_data_set_default_int(settings, "numThreads", 1);
 	obs_data_set_default_bool(settings, "enable_focal_blur", false);
 	obs_data_set_default_double(settings, "temporal_smooth_factor", 0.85);
@@ -305,6 +321,24 @@ void background_filter_update(void *data, obs_data_t *settings)
 	tf->maskEveryXFrames = (int)obs_data_get_int(settings, "mask_every_x_frames");
 	tf->maskEveryXFramesCount = (int)(0);
 	tf->blurBackground = obs_data_get_int(settings, "blur_background");
+
+	const std::string newBackgroundImagePath = obs_data_get_string(settings, "background_image");
+	if (newBackgroundImagePath != tf->backgroundImagePath) {
+		std::lock_guard<std::mutex> lock(tf->backgroundImageLock);
+		tf->backgroundImagePath = newBackgroundImagePath;
+		tf->backgroundImage.release();
+		tf->backgroundImageVersion++;
+
+		if (!newBackgroundImagePath.empty()) {
+			cv::Mat image = cv::imread(newBackgroundImagePath, cv::IMREAD_COLOR);
+			if (image.empty()) {
+				obs_log(LOG_WARNING, "Failed to load background image: %s",
+					newBackgroundImagePath.c_str());
+			} else {
+				cv::cvtColor(image, tf->backgroundImage, cv::COLOR_BGR2BGRA);
+			}
+		}
+	}
 	tf->enableFocalBlur = (float)obs_data_get_bool(settings, "enable_focal_blur");
 	tf->blurFocusPoint = (float)obs_data_get_double(settings, "blur_focus_point");
 	tf->blurFocusDepth = (float)obs_data_get_double(settings, "blur_focus_depth");
@@ -389,6 +423,8 @@ void background_filter_update(void *data, obs_data_t *settings)
 	obs_log(LOG_INFO, "  Enable Image Similarity: %s", tf->enableImageSimilarity ? "true" : "false");
 	obs_log(LOG_INFO, "  Image Similarity Threshold: %f", tf->imageSimilarityThreshold);
 	obs_log(LOG_INFO, "  Blur Background: %d", tf->blurBackground);
+	obs_log(LOG_INFO, "  Background Image: %s",
+		tf->backgroundImagePath.empty() ? "(none)" : tf->backgroundImagePath.c_str());
 	obs_log(LOG_INFO, "  Enable Focal Blur: %s", tf->enableFocalBlur ? "true" : "false");
 	obs_log(LOG_INFO, "  Blur Focus Point: %f", tf->blurFocusPoint);
 	obs_log(LOG_INFO, "  Blur Focus Depth: %f", tf->blurFocusDepth);
@@ -480,6 +516,7 @@ void background_filter_destroy(void *data)
 			}
 			gs_effect_destroy((*ptr)->effect);
 			gs_effect_destroy((*ptr)->kawaseBlurEffect);
+			gs_texture_destroy((*ptr)->backgroundImageTexture);
 			obs_leave_graphics();
 		}
 		// Delete the pointer to shared_ptr
@@ -675,6 +712,56 @@ void background_filter_video_tick(void *data, float seconds)
 	}
 }
 
+// Scales the image to cover the frame and center-crops it, so it is never distorted.
+static cv::Mat fit_background_image(const cv::Mat &image, uint32_t width, uint32_t height)
+{
+	const double scale = std::max((double)width / image.cols, (double)height / image.rows);
+	cv::Mat resized;
+	cv::resize(image, resized,
+		   cv::Size(std::max((int)width, (int)std::lround(image.cols * scale)),
+			    std::max((int)height, (int)std::lround(image.rows * scale))),
+		   cv::INTER_LINEAR);
+	const int x = (resized.cols - (int)width) / 2;
+	const int y = (resized.rows - (int)height) / 2;
+	return resized(cv::Rect(x, y, (int)width, (int)height)).clone();
+}
+
+// Returns the background image as a texture matching the frame size, or nullptr if no image is set.
+static gs_texture_t *prepare_background_image(std::shared_ptr<background_removal_filter> tf, uint32_t width,
+					      uint32_t height)
+{
+	std::lock_guard<std::mutex> lock(tf->backgroundImageLock);
+
+	if (tf->backgroundImage.empty()) {
+		if (tf->backgroundImageTexture) {
+			gs_texture_destroy(tf->backgroundImageTexture);
+			tf->backgroundImageTexture = nullptr;
+			tf->backgroundImageTextureWidth = 0;
+			tf->backgroundImageTextureHeight = 0;
+		}
+		return nullptr;
+	}
+
+	if (!tf->backgroundImageTexture || tf->backgroundImageTextureVersion != tf->backgroundImageVersion ||
+	    tf->backgroundImageTextureWidth != width || tf->backgroundImageTextureHeight != height) {
+		gs_texture_destroy(tf->backgroundImageTexture);
+		tf->backgroundImageTexture = nullptr;
+		tf->backgroundImageTextureVersion = tf->backgroundImageVersion;
+
+		cv::Mat frame = fit_background_image(tf->backgroundImage, width, height);
+		tf->backgroundImageTexture =
+			gs_texture_create(width, height, GS_BGRA, 1, (const uint8_t **)&frame.data, 0);
+		if (tf->backgroundImageTexture) {
+			tf->backgroundImageTextureWidth = width;
+			tf->backgroundImageTextureHeight = height;
+		} else {
+			obs_log(LOG_ERROR, "Failed to create background image texture");
+		}
+	}
+
+	return tf->backgroundImageTexture;
+}
+
 static gs_texture_t *blur_background(std::shared_ptr<background_removal_filter> tf, uint32_t width, uint32_t height,
 				     gs_texture_t *alphaTexture)
 {
@@ -787,8 +874,11 @@ void background_filter_video_render(void *data, gs_effect_t *_effect)
 		}
 	}
 
-	// Output the masked image
-	gs_texture_t *blurredTexture = blur_background(tf, width, height, alphaTexture);
+	// Output the masked image. A selected background image takes precedence over blur.
+	gs_texture_t *backgroundImageTexture = prepare_background_image(tf, width, height);
+	gs_texture_t *blurredTexture = backgroundImageTexture ? nullptr
+							      : blur_background(tf, width, height, alphaTexture);
+	gs_texture_t *backgroundTexture = backgroundImageTexture ? backgroundImageTexture : blurredTexture;
 
 	if (!obs_source_process_filter_begin(tf->source, GS_RGBA, OBS_ALLOW_DIRECT_RENDERING)) {
 		if (tf->source) {
@@ -804,19 +894,18 @@ void background_filter_video_render(void *data, gs_effect_t *_effect)
 
 	gs_effect_set_texture(alphamask, alphaTexture);
 
-	if (tf->blurBackground > 0) {
-		gs_effect_set_texture(blurredBackground, blurredTexture);
+	if (backgroundTexture) {
+		gs_effect_set_texture(blurredBackground, backgroundTexture);
 	}
 
 	gs_blend_state_push();
 	gs_reset_blend_state();
 
 	const char *techName;
-	if (tf->blurBackground > 0) {
-		if (tf->enableFocalBlur)
-			techName = "DrawWithFocalBlur";
-		else
-			techName = "DrawWithBlur";
+	if (backgroundImageTexture) {
+		techName = "DrawWithImage";
+	} else if (blurredTexture) {
+		techName = "DrawWithBlur";
 	} else {
 		techName = "DrawWithoutBlur";
 	}

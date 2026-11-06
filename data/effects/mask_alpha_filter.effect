@@ -89,3 +89,12 @@ technique DrawWithoutBlur
 		pixel_shader  = PSAlphaMaskRGBAWithoutBlur(v_in);
 	}
 }
+
+technique DrawWithImage
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader  = PSAlphaMaskRGBAWithBlur(v_in);
+	}
+}
