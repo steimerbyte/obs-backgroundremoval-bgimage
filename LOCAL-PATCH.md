@@ -2,8 +2,10 @@
 
 On top of upstream 1.4.1: the filter can composite a still image behind the person.
 
-- `src/background-filter.cpp`: `background_image` path property. The image is loaded with
-  OpenCV, cover-fitted to the frame size once per size change, and used instead of the blur.
+- `src/background-filter.cpp`: `background_image` path property plus placement controls
+  (`background_image_scale` 0.2–2.0, `background_image_offset_x/y` −1.0–1.0 as fractions of the
+  frame). The image is loaded with OpenCV and rendered into a frame-sized texture once per
+  change (`scale 1.0` = cover, smaller = zoom out with empty edges), then used instead of the blur.
 - `data/effects/mask_alpha_filter.effect`: new `DrawWithImage` technique, using the existing
   (previously unused) `PSAlphaMaskRGBAWithBlur` pixel shader.
 - `CMakeLists.txt`: link `opencv_imgcodecs`.

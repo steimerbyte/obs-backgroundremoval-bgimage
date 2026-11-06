@@ -1,6 +1,6 @@
 # OBS Plugin: Portrait Background Removal / Virtual Green-screen and Low-Light Enhancement
 
-> **Fork note.** Fork of [royshil/obs-backgroundremoval](https://github.com/royshil/obs-backgroundremoval) at tag `1.4.1`, with one addition: the Background Removal filter can composite a still image behind the person. Pick it under **Background image (replaces background)** in the filter properties; it takes precedence over the blur. Diff, build steps and rollback: [LOCAL-PATCH.md](LOCAL-PATCH.md).
+> **Fork note.** Fork of [royshil/obs-backgroundremoval](https://github.com/royshil/obs-backgroundremoval) at tag `1.4.1`, with one addition: the Background Removal filter can composite a still image behind the person. Pick it under **Background image (replaces background)** in the filter properties; it takes precedence over the blur. **Image scale** (`1.0` = fill frame, lower = zoom out) and **Image offset X/Y** move the image inside the frame. Diff, build steps and rollback: [LOCAL-PATCH.md](LOCAL-PATCH.md).
 
 
 <div align="center">

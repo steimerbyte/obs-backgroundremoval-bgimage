@@ -68,6 +68,9 @@ struct background_removal_filter : public filter_data, public std::enable_shared
 	float blurFocusDepth = 0.1f;
 
 	std::string backgroundImagePath;
+	float backgroundImageScale = 1.0f;
+	float backgroundImageOffsetX = 0.0f;
+	float backgroundImageOffsetY = 0.0f;
 	cv::Mat backgroundImage;
 	gs_texture_t *backgroundImageTexture = nullptr;
 	uint32_t backgroundImageTextureWidth = 0;
@@ -234,6 +237,12 @@ obs_properties_t *background_filter_properties(void *data)
 	/* Replaces the background with a still image (takes precedence over blur) */
 	obs_properties_add_path(props, "background_image", obs_module_text("BackgroundImage"), OBS_PATH_FILE,
 				"Image files (*.png *.jpg *.jpeg *.bmp *.webp);;All files (*.*)", nullptr);
+	obs_properties_add_float_slider(props, "background_image_scale", obs_module_text("BackgroundImageScale"), 0.2,
+					2.0, 0.01);
+	obs_properties_add_float_slider(props, "background_image_offset_x", obs_module_text("BackgroundImageOffsetX"),
+					-1.0, 1.0, 0.01);
+	obs_properties_add_float_slider(props, "background_image_offset_y", obs_module_text("BackgroundImageOffsetY"),
+					-1.0, 1.0, 0.01);
 
 	obs_property_t *p_enable_focal_blur =
 		obs_properties_add_bool(props, "enable_focal_blur", obs_module_text("EnableFocalBlur"));
@@ -284,6 +293,9 @@ void background_filter_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "mask_every_x_frames", 1);
 	obs_data_set_default_int(settings, "blur_background", 0);
 	obs_data_set_default_string(settings, "background_image", "");
+	obs_data_set_default_double(settings, "background_image_scale", 1.0);
+	obs_data_set_default_double(settings, "background_image_offset_x", 0.0);
+	obs_data_set_default_double(settings, "background_image_offset_y", 0.0);
 	obs_data_set_default_int(settings, "numThreads", 1);
 	obs_data_set_default_bool(settings, "enable_focal_blur", false);
 	obs_data_set_default_double(settings, "temporal_smooth_factor", 0.85);
@@ -338,6 +350,19 @@ void background_filter_update(void *data, obs_data_t *settings)
 				cv::cvtColor(image, tf->backgroundImage, cv::COLOR_BGR2BGRA);
 			}
 		}
+	}
+
+	const float newBackgroundImageScale = (float)obs_data_get_double(settings, "background_image_scale");
+	const float newBackgroundImageOffsetX = (float)obs_data_get_double(settings, "background_image_offset_x");
+	const float newBackgroundImageOffsetY = (float)obs_data_get_double(settings, "background_image_offset_y");
+	if (newBackgroundImageScale != tf->backgroundImageScale ||
+	    newBackgroundImageOffsetX != tf->backgroundImageOffsetX ||
+	    newBackgroundImageOffsetY != tf->backgroundImageOffsetY) {
+		std::lock_guard<std::mutex> lock(tf->backgroundImageLock);
+		tf->backgroundImageScale = newBackgroundImageScale;
+		tf->backgroundImageOffsetX = newBackgroundImageOffsetX;
+		tf->backgroundImageOffsetY = newBackgroundImageOffsetY;
+		tf->backgroundImageVersion++;
 	}
 	tf->enableFocalBlur = (float)obs_data_get_bool(settings, "enable_focal_blur");
 	tf->blurFocusPoint = (float)obs_data_get_double(settings, "blur_focus_point");
@@ -712,18 +737,34 @@ void background_filter_video_tick(void *data, float seconds)
 	}
 }
 
-// Scales the image to cover the frame and center-crops it, so it is never distorted.
-static cv::Mat fit_background_image(const cv::Mat &image, uint32_t width, uint32_t height)
+// Cover-fits the image to the frame, scaled by `scale` and shifted by the offsets
+// (fractions of the frame size). Areas the image does not cover stay transparent.
+static cv::Mat render_background_image(const cv::Mat &image, uint32_t width, uint32_t height, float scale,
+				       float offsetX, float offsetY)
 {
-	const double scale = std::max((double)width / image.cols, (double)height / image.rows);
+	cv::Mat frame((int)height, (int)width, CV_8UC4, cv::Scalar(0, 0, 0, 0));
+
+	const double coverScale = std::max((double)width / image.cols, (double)height / image.rows);
+	const double totalScale = coverScale * (double)scale;
+	const int drawWidth = std::max(1, (int)std::lround(image.cols * totalScale));
+	const int drawHeight = std::max(1, (int)std::lround(image.rows * totalScale));
+	const int x = (int)std::lround((double)(width - drawWidth) / 2.0 + (double)offsetX * width);
+	const int y = (int)std::lround((double)(height - drawHeight) / 2.0 + (double)offsetY * height);
+
 	cv::Mat resized;
-	cv::resize(image, resized,
-		   cv::Size(std::max((int)width, (int)std::lround(image.cols * scale)),
-			    std::max((int)height, (int)std::lround(image.rows * scale))),
-		   cv::INTER_LINEAR);
-	const int x = (resized.cols - (int)width) / 2;
-	const int y = (resized.rows - (int)height) / 2;
-	return resized(cv::Rect(x, y, (int)width, (int)height)).clone();
+	cv::resize(image, resized, cv::Size(drawWidth, drawHeight), 0, 0, cv::INTER_LINEAR);
+
+	const int srcX = std::max(0, -x);
+	const int srcY = std::max(0, -y);
+	const int dstX = std::max(0, x);
+	const int dstY = std::max(0, y);
+	const int copyWidth = std::min(drawWidth - srcX, (int)width - dstX);
+	const int copyHeight = std::min(drawHeight - srcY, (int)height - dstY);
+	if (copyWidth > 0 && copyHeight > 0) {
+		resized(cv::Rect(srcX, srcY, copyWidth, copyHeight))
+			.copyTo(frame(cv::Rect(dstX, dstY, copyWidth, copyHeight)));
+	}
+	return frame;
 }
 
 // Returns the background image as a texture matching the frame size, or nullptr if no image is set.
@@ -748,7 +789,8 @@ static gs_texture_t *prepare_background_image(std::shared_ptr<background_removal
 		tf->backgroundImageTexture = nullptr;
 		tf->backgroundImageTextureVersion = tf->backgroundImageVersion;
 
-		cv::Mat frame = fit_background_image(tf->backgroundImage, width, height);
+		cv::Mat frame = render_background_image(tf->backgroundImage, width, height, tf->backgroundImageScale,
+							tf->backgroundImageOffsetX, tf->backgroundImageOffsetY);
 		tf->backgroundImageTexture =
 			gs_texture_create(width, height, GS_BGRA, 1, (const uint8_t **)&frame.data, 0);
 		if (tf->backgroundImageTexture) {
