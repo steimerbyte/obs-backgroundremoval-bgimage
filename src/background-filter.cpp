@@ -748,8 +748,9 @@ static cv::Mat render_background_image(const cv::Mat &image, uint32_t width, uin
 	const double totalScale = coverScale * (double)scale;
 	const int drawWidth = std::max(1, (int)std::lround(image.cols * totalScale));
 	const int drawHeight = std::max(1, (int)std::lround(image.rows * totalScale));
-	const int x = (int)std::lround((double)(width - drawWidth) / 2.0 + (double)offsetX * width);
-	const int y = (int)std::lround((double)(height - drawHeight) / 2.0 + (double)offsetY * height);
+	// Cast before subtracting: width/height are uint32_t, so width - drawWidth would wrap.
+	const int x = (int)std::lround(((double)width - drawWidth) / 2.0 + (double)offsetX * width);
+	const int y = (int)std::lround(((double)height - drawHeight) / 2.0 + (double)offsetY * height);
 
 	cv::Mat resized;
 	cv::resize(image, resized, cv::Size(drawWidth, drawHeight), 0, 0, cv::INTER_LINEAR);
