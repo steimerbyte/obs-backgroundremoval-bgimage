@@ -88,6 +88,27 @@ Der Threshold verschiebt die Kante um etwa 1 px pro 0.2: höher = weiter in die 
 Sub-Pixel-Kante auf der zweiten Szene (Studio, 1920x1080): Übergangsband (0.1 < Kameraanteil < 0.9)
 25.983 px -> **0 px**; auf der Schreibtsich-Szene 25.492 -> 4.087 px.
 
+## Defaults = schärfste Variante
+
+`contour_filter` stand auf 0.05, und jeder Wert zwischen 0 und 1 schaltet auf den binären
+Konturpfad — also lief ein frischer Filter nie über die Sub-Pixel-Kante. Der Default ist jetzt 0.0;
+damit sind die Werkseinstellungen gemessen die schärfste Variante:
+
+| Kennzahl | Defaults (gemessen) |
+|---|---|
+| Übergangsband (0.1 < Kameraanteil < 0.9) | 2 px |
+| Kantenbreite Median | 1,0 px |
+| Abstand Maske -> nächste starke Bildkante | Median 2,67 px, p75 10,3 px |
+| Maske | 381.661 px, Mask Edge: sub-pixel im Log |
+
+Die übrigen Qualitätsdefaults sind bereits neutral: `mask_expansion 0`, `feather 0`,
+`background_edge_feather 0`, `mask_every_x_frames 1`. `temporal_smooth_factor 0.85` bleibt an
+(kostet nichts bei Modellauflösung und senkt das Flackern um 11 %).
+
+Gemessene Frame-Zeiten im OBS (1080p, MediaPipe, Similarity aus, je zwei A/B-Paare): Defaults
+29-32 ms, mit `mask_every_x_frames 3` 20-22 ms (Maske dann bis zu 2 Frames alt), mit
+`background_edge_feather 0.25` 32-35 ms.
+
 ## Verworfen, weil gemessen schlechter
 
 | Versuch | Messung | Urteil |
