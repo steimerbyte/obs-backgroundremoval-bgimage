@@ -88,6 +88,16 @@ Der Threshold verschiebt die Kante um etwa 1 px pro 0.2: höher = weiter in die 
 Sub-Pixel-Kante auf der zweiten Szene (Studio, 1920x1080): Übergangsband (0.1 < Kameraanteil < 0.9)
 25.983 px -> **0 px**; auf der Schreibtsich-Szene 25.492 -> 4.087 px.
 
+## Verworfen, weil gemessen schlechter
+
+| Versuch | Messung | Urteil |
+|---|---|---|
+| Bandbegrenztes Joint-Bilateral auf der Wahrscheinlichkeit (3x3, 13.246 Bandpixel) | 3,3-7,4 ms; Median-Offset -2 -> -3 px, mean abs 8,60 -> 9,29 px; Kantenabstand p90 25 -> 22 px | kein Gewinn, zu teuer - der Rand ist ein isotroper Mittelwert und verschiebt die 0.5-Fläche nicht dorthin, wo die Farbe sie hat |
+| Joint-Bilateral 5x5 mit weitem Sigma (35.900 Bandpixel) | 5,2-10,6 ms; Median-Offset -2 -> -5 px, mean abs 8,62 -> 10,29 px | klar schlechter, verwandt mit "Blur bei Modellauflösung" |
+| 3x3-Gauß auf der Wahrscheinlichkeit bei Modellauflösung | entspricht 22 px bei 1080p, verschiebt die Kante 3-4 px, senkt Flackern nur 11 % | verworfen |
+| `pphumanseg_fp32` statt MediaPipe | +35 ms Frame-Renderzeit (64,8-66,3 ms statt 29,1-31,1 ms), dafür Kantenabstand Median 3,33 -> 2,33 px, p90 25 -> 13 px, Fläche +9,6 % | nicht 30-fps-fähig; nur als Qualitätsmodus oder mit Frame-Wiederverwendung interessant |
+| Ganzflächige Kantenfilter (fremd gemessen, OpenCV 5.0.0, 2,07 MP) | guidedFilter 152,9 ms, dtFilter NC 89,0 ms, fastGlobalSmootherFilter 37,2 ms, fastBilateralSolverFilter 474,5 ms, jointBilateralFilter d=5 24,9 ms | Faktor 10-300 über Budget |
+
 ## Kosten je Einstellung, im laufenden OBS gemessen
 
 `averageFrameRenderTime` des Grafikthreads, 1920x1080, MediaPipe, Similarity-Check aus, je zwei
