@@ -32,6 +32,39 @@ runs):
 edgeBlur`, `PSAlphaMaskRGBAWithBlurEdge` and the `DrawWithImageEdge` technique; the texture and
 the float are only set when the technique is used.
 
+## Local patch: logo layer
+
+`logo_image` (transparent PNG/WebP), `logo_scale` (0.01..2.0 of the logo's own pixels) and
+`logo_offset_x`/`logo_offset_y` (-1..1 of the frame, same convention as the background image)
+composite a logo over the finished frame. The logo is blended inside `mask_alpha_filter.effect`
+(`ApplyLogo` in every pixel shader, straight alpha "over"), so it survives all four techniques and
+does not depend on filter draw order. With no logo set the output is pixel-identical to before
+(measured: 0 differing pixels of 2,073,600 on a 1920x1080 frame).
+
+Measured on the isolated harness (1920x1080, still source, logo 400x200 with an opaque red half and
+a 50 % blue half, scale 0.5, offset 0.30/-0.40): the red half lands at x 1436..1535, y 58..157
+(10,000 px, exactly the predicted rect), the 50 % half composites to (127,0,255) over a magenta
+background, i.e. 0.5 * blue + 0.5 * background. Verified in the background-image, blur and
+transparent techniques.
+
+## How far the cutout sits from the silhouette (measured)
+
+Threshold 0.5, no expansion, no feather, no contour filter = the model's own sub-pixel edge = the
+reference. Every setting below was measured against that reference on the same frame
+(`mask_expansion` is reported by the plugin as "Mask Expansion", the log line used %f on an int and
+always printed 0 - now %d):
+
+| setting | cutout moves | area | measured on |
+|---|---|---|---|
+| `mask_expansion 30` | 18.3 px outward (p90 35.7) | +94,808 px | 1920x1080 still frame |
+| `threshold 1.0` | 3.7 px inward (p90 9.0) | -25,989 px | same |
+| `feather 1.0` | 10.3 px inward (p90 18.7) | -45,464 px | same |
+| `contour_filter 0.25` | 14.3 px outward (p90 41.0) plus 1.0 px inward | +13,277 / -1,684 px | same |
+
+So a ring of the real room around the person is mostly `mask_expansion` (positive dilates, contrary
+to the slider's help text) and `contour_filter`; `threshold 1.0` and a large `feather` instead eat
+into the person.
+
 ## Local patch: sub-pixel mask edge
 
 With a threshold the mask used to become binary at the model resolution (256x144 for MediaPipe) and

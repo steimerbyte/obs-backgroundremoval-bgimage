@@ -90,6 +90,16 @@ struct background_removal_filter : public filter_data, public std::enable_shared
 	uint64_t backgroundImageTextureVersion = 0;
 	std::mutex backgroundImageLock;
 
+	std::string logoImagePath;
+	float logoImageScale = 0.25f;
+	float logoImageOffsetX = 0.0f;
+	float logoImageOffsetY = 0.0f;
+	cv::Mat logoImage;  // BGRA, keeps the logo's own size and alpha
+	gs_texture_t *logoImageTexture = nullptr;
+	uint64_t logoImageVersion = 0;
+	uint64_t logoImageTextureVersion = 0;
+	std::mutex logoImageLock;
+
 	gs_effect_t *effect = nullptr;
 	gs_effect_t *kawaseBlurEffect = nullptr;
 
@@ -265,6 +275,11 @@ obs_properties_t *background_filter_properties(void *data)
 					1.0, 0.01);
 	obs_properties_add_float_slider(props, "background_edge_blur", obs_module_text("BackgroundEdgeBlur"), 0.0, 1.0,
 					0.01);
+	obs_properties_add_path(props, "logo_image", obs_module_text("LogoImage"), OBS_PATH_FILE,
+				"Image files (*.png *.webp *.bmp);;All files (*.*)", nullptr);
+	obs_properties_add_float_slider(props, "logo_scale", obs_module_text("LogoScale"), 0.01, 2.0, 0.01);
+	obs_properties_add_float_slider(props, "logo_offset_x", obs_module_text("LogoOffsetX"), -1.0, 1.0, 0.01);
+	obs_properties_add_float_slider(props, "logo_offset_y", obs_module_text("LogoOffsetY"), -1.0, 1.0, 0.01);
 
 	obs_property_t *p_enable_focal_blur =
 		obs_properties_add_bool(props, "enable_focal_blur", obs_module_text("EnableFocalBlur"));
@@ -320,6 +335,10 @@ void background_filter_defaults(obs_data_t *settings)
 	obs_data_set_default_double(settings, "background_image_offset_y", 0.0);
 	obs_data_set_default_double(settings, "background_edge_feather", 0.0);
 	obs_data_set_default_double(settings, "background_edge_blur", 0.0);
+	obs_data_set_default_string(settings, "logo_image", "");
+	obs_data_set_default_double(settings, "logo_scale", 0.25);
+	obs_data_set_default_double(settings, "logo_offset_x", 0.0);
+	obs_data_set_default_double(settings, "logo_offset_y", 0.0);
 	obs_data_set_default_int(settings, "numThreads", 1);
 	obs_data_set_default_bool(settings, "enable_focal_blur", false);
 	obs_data_set_default_double(settings, "temporal_smooth_factor", 0.85);
@@ -360,6 +379,34 @@ void background_filter_update(void *data, obs_data_t *settings)
 	tf->maskEveryXFrames = (int)obs_data_get_int(settings, "mask_every_x_frames");
 	tf->maskEveryXFramesCount = (int)(0);
 	tf->blurBackground = obs_data_get_int(settings, "blur_background");
+
+	tf->logoImageScale = (float)obs_data_get_double(settings, "logo_scale");
+	tf->logoImageOffsetX = (float)obs_data_get_double(settings, "logo_offset_x");
+	tf->logoImageOffsetY = (float)obs_data_get_double(settings, "logo_offset_y");
+
+	const std::string newLogoImagePath = obs_data_get_string(settings, "logo_image");
+	if (newLogoImagePath != tf->logoImagePath) {
+		std::lock_guard<std::mutex> lock(tf->logoImageLock);
+		tf->logoImagePath = newLogoImagePath;
+		tf->logoImage.release();
+		tf->logoImageVersion++;
+
+		if (!newLogoImagePath.empty()) {
+			// IMREAD_UNCHANGED keeps the alpha channel of a transparent logo.
+			cv::Mat image = cv::imread(newLogoImagePath, cv::IMREAD_UNCHANGED);
+			if (image.empty()) {
+				obs_log(LOG_WARNING, "Failed to load logo image: %s", newLogoImagePath.c_str());
+			} else if (image.channels() == 4) {
+				tf->logoImage = image;
+			} else if (image.channels() == 3) {
+				cv::cvtColor(image, tf->logoImage, cv::COLOR_BGR2BGRA);
+			} else if (image.channels() == 1) {
+				cv::cvtColor(image, tf->logoImage, cv::COLOR_GRAY2BGRA);
+			} else {
+				obs_log(LOG_WARNING, "Unsupported logo image channel count: %d", image.channels());
+			}
+		}
+	}
 
 	const std::string newBackgroundImagePath = obs_data_get_string(settings, "background_image");
 	if (newBackgroundImagePath != tf->backgroundImagePath) {
@@ -478,7 +525,7 @@ void background_filter_update(void *data, obs_data_t *settings)
 						  ? "sub-pixel (probability upscaled, thresholded at full resolution)"
 						  : "mask-resolution (binary, contour filter or threshold off)");
 	obs_log(LOG_INFO, "  Smooth Contour: %f", tf->smoothContour);
-	obs_log(LOG_INFO, "  Mask Expansion: %f", tf->maskExpansion);
+	obs_log(LOG_INFO, "  Mask Expansion: %d", tf->maskExpansion);
 	obs_log(LOG_INFO, "  Feather: %f", tf->feather);
 	obs_log(LOG_INFO, "  Mask Every X Frames: %d", tf->maskEveryXFrames);
 	obs_log(LOG_INFO, "  Enable Image Similarity: %s", tf->enableImageSimilarity ? "true" : "false");
@@ -488,6 +535,8 @@ void background_filter_update(void *data, obs_data_t *settings)
 		tf->backgroundImagePath.empty() ? "(none)" : tf->backgroundImagePath.c_str());
 	obs_log(LOG_INFO, "  Background Edge Feather: %f", tf->backgroundEdgeFeather);
 	obs_log(LOG_INFO, "  Background Edge Blur: %f", tf->backgroundEdgeBlur);
+	obs_log(LOG_INFO, "  Logo Image: %s (scale %.2f, offset %.2f/%.2f)", tf->logoImagePath.c_str(),
+		tf->logoImageScale, tf->logoImageOffsetX, tf->logoImageOffsetY);
 	obs_log(LOG_INFO, "  Enable Focal Blur: %s", tf->enableFocalBlur ? "true" : "false");
 	obs_log(LOG_INFO, "  Blur Focus Point: %f", tf->blurFocusPoint);
 	obs_log(LOG_INFO, "  Blur Focus Depth: %f", tf->blurFocusDepth);
@@ -580,6 +629,7 @@ void background_filter_destroy(void *data)
 			gs_effect_destroy((*ptr)->effect);
 			gs_effect_destroy((*ptr)->kawaseBlurEffect);
 			gs_texture_destroy((*ptr)->backgroundImageTexture);
+			gs_texture_destroy((*ptr)->logoImageTexture);
 			gs_texture_destroy((*ptr)->alphaTexture);
 			gs_texture_destroy((*ptr)->blurredTexture);
 			obs_leave_graphics();
@@ -882,6 +932,34 @@ static gs_texture_t *prepare_background_image(std::shared_ptr<background_removal
 	return tf->backgroundImageTexture;
 }
 
+static gs_texture_t *prepare_logo_image(std::shared_ptr<background_removal_filter> tf)
+{
+	std::lock_guard<std::mutex> lock(tf->logoImageLock);
+
+	if (tf->logoImage.empty()) {
+		if (tf->logoImageTexture) {
+			gs_texture_destroy(tf->logoImageTexture);
+			tf->logoImageTexture = nullptr;
+			tf->logoImageTextureVersion = tf->logoImageVersion;
+		}
+		return nullptr;
+	}
+
+	if (!tf->logoImageTexture || tf->logoImageTextureVersion != tf->logoImageVersion) {
+		gs_texture_destroy(tf->logoImageTexture);
+		tf->logoImageTexture = nullptr;
+		tf->logoImageTextureVersion = tf->logoImageVersion;
+
+		tf->logoImageTexture = gs_texture_create((uint32_t)tf->logoImage.cols, (uint32_t)tf->logoImage.rows,
+							 GS_BGRA, 1, (const uint8_t **)&tf->logoImage.data, 0);
+		if (!tf->logoImageTexture) {
+			obs_log(LOG_ERROR, "Failed to create logo image texture");
+		}
+	}
+
+	return tf->logoImageTexture;
+}
+
 static gs_texture_t *blur_background(std::shared_ptr<background_removal_filter> tf, uint32_t width, uint32_t height,
 				     gs_texture_t *alphaTexture, int passes)
 {
@@ -1055,6 +1133,23 @@ void background_filter_video_render(void *data, gs_effect_t *_effect)
 	if (cameraBlurTexture) {
 		gs_effect_set_texture(gs_effect_get_param_by_name(tf->effect, "cameraBlur"), cameraBlurTexture);
 		gs_effect_set_float(gs_effect_get_param_by_name(tf->effect, "edgeBlur"), tf->backgroundEdgeBlur);
+	}
+
+	// Optional logo layer, composited inside the effect over the finished frame.
+	gs_texture_t *logoTexture = prepare_logo_image(tf);
+	gs_effect_set_int(gs_effect_get_param_by_name(tf->effect, "logoEnabled"), logoTexture ? 1 : 0);
+	if (logoTexture) {
+		const double logoScale = (double)tf->logoImageScale;
+		const double logoWidth = std::max(1.0, (double)gs_texture_get_width(logoTexture) * logoScale);
+		const double logoHeight = std::max(1.0, (double)gs_texture_get_height(logoTexture) * logoScale);
+		const double logoX = ((double)width - logoWidth) / 2.0 + (double)tf->logoImageOffsetX * (double)width;
+		const double logoY = ((double)height - logoHeight) / 2.0 + (double)tf->logoImageOffsetY * (double)height;
+
+		struct vec4 logoRect;
+		vec4_set(&logoRect, (float)(logoX / (double)width), (float)(logoY / (double)height),
+			 (float)(logoWidth / (double)width), (float)(logoHeight / (double)height));
+		gs_effect_set_vec4(gs_effect_get_param_by_name(tf->effect, "logoRect"), &logoRect);
+		gs_effect_set_texture(gs_effect_get_param_by_name(tf->effect, "logoImage"), logoTexture);
 	}
 
 	gs_blend_state_push();
