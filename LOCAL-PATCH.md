@@ -32,6 +32,24 @@ runs):
 edgeBlur`, `PSAlphaMaskRGBAWithBlurEdge` and the `DrawWithImageEdge` technique; the texture and
 the float are only set when the technique is used.
 
+## Local patch: sub-pixel mask edge
+
+With a threshold the mask used to become binary at the model resolution (256x144 for MediaPipe) and
+was then resized to the frame, so the silhouette carried the model's 7.5 px grid as a blocky
+staircase and its transition band showed the real room at up to 50 %.
+
+Now the probability stays intact (`255 - probability` in `maskScratch`) and only the full-resolution
+upscale is thresholded: `cv::resize(..., INTER_CUBIC)` followed by `compare(mask, 255 - thr*255,
+CMP_GT)`. The edge follows the 0.5 crossing of the interpolated probability instead of the
+model grid. Measured at 1920x1080, MediaPipe, threshold 0.5, injected 256x144 test mask on a
+person frame: transition band (pixels with 0.1 < camera share < 0.9) 25,492 -> 4,087 px (-84 %),
+person area 380,518 -> 377,692 px, cost +1.24 ms per tick (bilinear 0.18 ms -> cubic 1.42 ms,
+measured standalone with OpenCV 5.0.0 on this machine).
+
+The contour filter (`contour_filter` between 0 and 1) rewrites the mask as filled contours, which is
+binary by nature; with it enabled the old mask-resolution path stays and the log says so in
+`Mask Edge:`.
+
 ## Performance (same output)
 
 Per frame the filter used to allocate and copy several full frames on the graphics thread and

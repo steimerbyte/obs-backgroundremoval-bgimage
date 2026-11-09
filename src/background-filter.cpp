@@ -63,6 +63,9 @@ struct background_removal_filter : public filter_data, public std::enable_shared
 	cv::Mat maskFull;     // full-resolution mask scratch, holds the live mask at the end of a tick
 	cv::Mat maskBin;      // second full-resolution scratch, swapped with maskFull
 	cv::Mat maskFeather;  // full-resolution scratch for the background edge feather (boxFilter output)
+	bool softMaskInTick = true;  // keep the model probability instead of a binary mask (sub-pixel edge)
+	bool maskSoft = false;       // the mask currently holds 255-probability, not 0/255
+	uint8_t threshold8 = 128;    // 255 - threshold*255, the full-resolution compare threshold
 	float temporalSmoothFactor = 0.0f;
 	float imageSimilarityThreshold = 35.0f;
 	bool enableImageSimilarity = true;
@@ -349,6 +352,9 @@ void background_filter_update(void *data, obs_data_t *settings)
 
 	tf->contourFilter = (float)obs_data_get_double(settings, "contour_filter");
 	tf->smoothContour = (float)obs_data_get_double(settings, "smooth_contour");
+	// The contour filter rewrites the mask as filled contours (binary), so it cannot keep the
+	// probability; without it the mask edge stays sub-pixel accurate.
+	tf->softMaskInTick = !(tf->contourFilter > 0.0 && tf->contourFilter < 1.0);
 	tf->maskExpansion = (int)obs_data_get_double(settings, "mask_expansion");
 	tf->feather = (float)obs_data_get_double(settings, "feather");
 	tf->maskEveryXFrames = (int)obs_data_get_int(settings, "mask_every_x_frames");
@@ -468,6 +474,9 @@ void background_filter_update(void *data, obs_data_t *settings)
 	obs_log(LOG_INFO, "  Enable Threshold: %s", tf->enableThreshold ? "true" : "false");
 	obs_log(LOG_INFO, "  Threshold: %f", tf->threshold);
 	obs_log(LOG_INFO, "  Contour Filter: %f", tf->contourFilter);
+	obs_log(LOG_INFO, "  Mask Edge: %s", tf->softMaskInTick && tf->enableThreshold
+						  ? "sub-pixel (probability upscaled, thresholded at full resolution)"
+						  : "mask-resolution (binary, contour filter or threshold off)");
 	obs_log(LOG_INFO, "  Smooth Contour: %f", tf->smoothContour);
 	obs_log(LOG_INFO, "  Mask Expansion: %f", tf->maskExpansion);
 	obs_log(LOG_INFO, "  Feather: %f", tf->feather);
@@ -594,9 +603,19 @@ static void processImageForBackground(struct background_removal_filter *tf, cons
 	if (tf->enableThreshold) {
 		// We need to make tf->threshold (float [0,1]) be in that range
 		const uint8_t threshold_value = (uint8_t)(tf->threshold * 255.0f);
-		cv::compare(outputImage, threshold_value, tf->maskScratch, cv::CMP_LT);
+		if (tf->softMaskInTick) {
+			// Keep the probability and threshold in full resolution: a cubic upscale of the
+			// probability puts the edge on its 0.5 crossing instead of the 256x144 grid.
+			cv::subtract(255, outputImage, tf->maskScratch);
+			tf->maskSoft = true;
+			tf->threshold8 = (uint8_t)(255 - threshold_value);
+		} else {
+			cv::compare(outputImage, threshold_value, tf->maskScratch, cv::CMP_LT);
+			tf->maskSoft = false;
+		}
 	} else {
 		cv::subtract(255, outputImage, tf->maskScratch);
+		tf->maskSoft = false;
 	}
 	// Shallow: the caller owns the result only until the next call, the buffer is reused.
 	backgroundMask = tf->maskScratch;
@@ -730,11 +749,21 @@ void background_filter_video_tick(void *data, float seconds)
 
 				// Resize the size of the mask back to the size of the original input.
 				// maskFull/maskBin are reused, so the resize writes into existing storage.
-				cv::resize(backgroundMask, tf->maskFull, imageBGRA.size());
-				backgroundMask = tf->maskFull;
+				if (tf->maskSoft) {
+					// Cubic keeps the sub-pixel position of the probability; the binary
+					// threshold then runs on the full-resolution result.
+					cv::resize(backgroundMask, tf->maskFull, imageBGRA.size(), 0, 0,
+						   cv::INTER_CUBIC);
+					cv::compare(tf->maskFull, tf->threshold8, tf->maskBin, cv::CMP_GT);
+					std::swap(tf->maskFull, tf->maskBin);
+					backgroundMask = tf->maskFull;
+				} else {
+					cv::resize(backgroundMask, tf->maskFull, imageBGRA.size());
+					backgroundMask = tf->maskFull;
+				}
 
 				// Additional contour processing at full resolution
-				if (tf->smoothContour > 0.0) {
+				if (!tf->maskSoft && tf->smoothContour > 0.0) {
 					// If the mask was smoothed, apply a threshold to get a binary mask
 					cv::compare(backgroundMask, 128, tf->maskBin, cv::CMP_GT);
 					std::swap(tf->maskFull, tf->maskBin);
