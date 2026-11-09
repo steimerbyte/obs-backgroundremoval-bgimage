@@ -13,3 +13,6 @@
 /release/
 /vcpkg/
 /*_lock.txt
+
+# local build trees
+build*/
