@@ -11,6 +11,27 @@ On top of upstream 1.4.1: the filter can composite a still image behind the pers
 - `CMakeLists.txt`: link `opencv_imgcodecs`.
 - `data/locale/en-US.ini`: `BackgroundImage` label.
 
+## Local patch: edge feather and edge blur
+
+Two extra sliders for the background image, both default 0.0 (0.0 = the old behaviour, nothing
+runs):
+
+- `background_edge_feather` ("Edge Feather"): after the threshold/erode/dilate/feather chain the
+  full-resolution mask is box-filtered with a radius of
+  `clamp(round(feather * 0.03 * maskRows), 1, 40)` pixels, so the person fades into the image
+  instead of ending in a hard contour. The filter runs on the CPU in `video_tick` and only when
+  `enableThreshold` is on. The result goes into the extra `maskFeather` scratch Mat, because
+  `cv::boxFilter` must not write into its own input.
+- `background_edge_blur` ("Edge Blur (camera)"): when a background image is used, the camera is
+  kawase-blurred with `2 + round(value * 6)` passes and `DrawWithImageEdge` mixes it in with
+  `smoothstep(0.0, 0.5, mask) * value`: sharp in the solid person (`mask = 0`), fully blurred at
+  the silhouette (`mask >= 0.5`), so the seam where the camera is 50 % visible carries no sharp
+  room detail. Without the feather the mask is binary and this slider has no visible effect.
+
+`data/effects/mask_alpha_filter.effect` gained `uniform texture2d cameraBlur`, `uniform float
+edgeBlur`, `PSAlphaMaskRGBAWithBlurEdge` and the `DrawWithImageEdge` technique; the texture and
+the float are only set when the technique is used.
+
 ## Performance (same output)
 
 Per frame the filter used to allocate and copy several full frames on the graphics thread and

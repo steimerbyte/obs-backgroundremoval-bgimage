@@ -20,6 +20,7 @@
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <numeric>
 #include <memory>
@@ -61,6 +62,7 @@ struct background_removal_filter : public filter_data, public std::enable_shared
 	cv::Mat maskScratch;  // model-resolution mask scratch (compare / 255-img)
 	cv::Mat maskFull;     // full-resolution mask scratch, holds the live mask at the end of a tick
 	cv::Mat maskBin;      // second full-resolution scratch, swapped with maskFull
+	cv::Mat maskFeather;  // full-resolution scratch for the background edge feather (boxFilter output)
 	float temporalSmoothFactor = 0.0f;
 	float imageSimilarityThreshold = 35.0f;
 	bool enableImageSimilarity = true;
@@ -75,6 +77,8 @@ struct background_removal_filter : public filter_data, public std::enable_shared
 	float backgroundImageScale = 1.0f;
 	float backgroundImageOffsetX = 0.0f;
 	float backgroundImageOffsetY = 0.0f;
+	float backgroundEdgeFeather = 0.0f;
+	float backgroundEdgeBlur = 0.0f;
 	cv::Mat backgroundImage;
 	gs_texture_t *backgroundImageTexture = nullptr;
 	uint32_t backgroundImageTextureWidth = 0;
@@ -254,6 +258,10 @@ obs_properties_t *background_filter_properties(void *data)
 					-1.0, 1.0, 0.01);
 	obs_properties_add_float_slider(props, "background_image_offset_y", obs_module_text("BackgroundImageOffsetY"),
 					-1.0, 1.0, 0.01);
+	obs_properties_add_float_slider(props, "background_edge_feather", obs_module_text("BackgroundEdgeFeather"), 0.0,
+					1.0, 0.01);
+	obs_properties_add_float_slider(props, "background_edge_blur", obs_module_text("BackgroundEdgeBlur"), 0.0, 1.0,
+					0.01);
 
 	obs_property_t *p_enable_focal_blur =
 		obs_properties_add_bool(props, "enable_focal_blur", obs_module_text("EnableFocalBlur"));
@@ -307,6 +315,8 @@ void background_filter_defaults(obs_data_t *settings)
 	obs_data_set_default_double(settings, "background_image_scale", 1.0);
 	obs_data_set_default_double(settings, "background_image_offset_x", 0.0);
 	obs_data_set_default_double(settings, "background_image_offset_y", 0.0);
+	obs_data_set_default_double(settings, "background_edge_feather", 0.0);
+	obs_data_set_default_double(settings, "background_edge_blur", 0.0);
 	obs_data_set_default_int(settings, "numThreads", 1);
 	obs_data_set_default_bool(settings, "enable_focal_blur", false);
 	obs_data_set_default_double(settings, "temporal_smooth_factor", 0.85);
@@ -375,6 +385,8 @@ void background_filter_update(void *data, obs_data_t *settings)
 		tf->backgroundImageOffsetY = newBackgroundImageOffsetY;
 		tf->backgroundImageVersion++;
 	}
+	tf->backgroundEdgeFeather = (float)obs_data_get_double(settings, "background_edge_feather");
+	tf->backgroundEdgeBlur = (float)obs_data_get_double(settings, "background_edge_blur");
 	tf->enableFocalBlur = (float)obs_data_get_bool(settings, "enable_focal_blur");
 	tf->blurFocusPoint = (float)obs_data_get_double(settings, "blur_focus_point");
 	tf->blurFocusDepth = (float)obs_data_get_double(settings, "blur_focus_depth");
@@ -465,6 +477,8 @@ void background_filter_update(void *data, obs_data_t *settings)
 	obs_log(LOG_INFO, "  Blur Background: %d", tf->blurBackground);
 	obs_log(LOG_INFO, "  Background Image: %s",
 		tf->backgroundImagePath.empty() ? "(none)" : tf->backgroundImagePath.c_str());
+	obs_log(LOG_INFO, "  Background Edge Feather: %f", tf->backgroundEdgeFeather);
+	obs_log(LOG_INFO, "  Background Edge Blur: %f", tf->backgroundEdgeBlur);
 	obs_log(LOG_INFO, "  Enable Focal Blur: %s", tf->enableFocalBlur ? "true" : "false");
 	obs_log(LOG_INFO, "  Blur Focus Point: %f", tf->blurFocusPoint);
 	obs_log(LOG_INFO, "  Blur Focus Depth: %f", tf->blurFocusDepth);
@@ -745,6 +759,16 @@ void background_filter_video_tick(void *data, float seconds)
 					cv::boxFilter(backgroundMask, backgroundMask, tf->backgroundMask.depth(),
 						      cv::Size(k_size, k_size));
 				}
+
+				// Soft edge toward the background image. boxFilter must not alias its input,
+				// so the result goes to a separate scratch Mat.
+				if (tf->backgroundEdgeFeather > 0.0) {
+					const double featherPx = tf->backgroundEdgeFeather * 0.03 * backgroundMask.rows;
+					const int r = std::clamp((int)std::lround(featherPx), 1, 40);
+					cv::boxFilter(backgroundMask, tf->maskFeather, backgroundMask.depth(),
+						      cv::Size(2 * r + 1, 2 * r + 1));
+					backgroundMask = tf->maskFeather;
+				}
 			}
 
 			// Save the mask for the next frame
@@ -830,9 +854,9 @@ static gs_texture_t *prepare_background_image(std::shared_ptr<background_removal
 }
 
 static gs_texture_t *blur_background(std::shared_ptr<background_removal_filter> tf, uint32_t width, uint32_t height,
-				     gs_texture_t *alphaTexture)
+				     gs_texture_t *alphaTexture, int passes)
 {
-	if (tf->blurBackground == 0 || !tf->kawaseBlurEffect) {
+	if (passes <= 0 || !tf->kawaseBlurEffect) {
 		return nullptr;
 	}
 	// Reused across frames; gs_copy_texture needs a plain (non-dynamic) texture as its target.
@@ -857,7 +881,7 @@ static gs_texture_t *blur_background(std::shared_ptr<background_removal_filter> 
 	gs_eparam_t *blurFocusPointParam = gs_effect_get_param_by_name(tf->kawaseBlurEffect, "blurFocusPoint");
 	gs_eparam_t *blurFocusDepthParam = gs_effect_get_param_by_name(tf->kawaseBlurEffect, "blurFocusDepth");
 
-	for (int i = 0; i < (int)tf->blurBackground; i++) {
+	for (int i = 0; i < passes; i++) {
 		gs_texrender_reset(tf->texrender);
 		if (!gs_texrender_begin(tf->texrender, width, height)) {
 			obs_log(LOG_INFO, "Could not open background blur texrender!");
@@ -869,7 +893,7 @@ static gs_texture_t *blur_background(std::shared_ptr<background_removal_filter> 
 		gs_effect_set_float(xOffset, ((float)i + 0.5f) / (float)width);
 		gs_effect_set_float(yOffset, ((float)i + 0.5f) / (float)height);
 		gs_effect_set_int(blurIter, i);
-		gs_effect_set_int(blurTotal, (int)tf->blurBackground);
+		gs_effect_set_int(blurTotal, passes);
 		gs_effect_set_float(blurFocusPointParam, tf->blurFocusPoint);
 		gs_effect_set_float(blurFocusDepthParam, tf->blurFocusDepth);
 
@@ -972,8 +996,15 @@ void background_filter_video_render(void *data, gs_effect_t *_effect)
 
 	// Output the masked image. A selected background image takes precedence over blur.
 	gs_texture_t *backgroundImageTexture = prepare_background_image(tf, width, height);
-	gs_texture_t *blurredTexture = backgroundImageTexture ? nullptr
-							      : blur_background(tf, width, height, alphaTexture);
+	gs_texture_t *cameraBlurTexture = nullptr;
+	if (backgroundImageTexture && tf->backgroundEdgeBlur > 0.0f) {
+		// Blur the camera for the background side of the feathered edge.
+		cameraBlurTexture = blur_background(tf, width, height, alphaTexture,
+						    2 + (int)std::lround(tf->backgroundEdgeBlur * 6.0f));
+	}
+	gs_texture_t *blurredTexture =
+		backgroundImageTexture ? nullptr
+				       : blur_background(tf, width, height, alphaTexture, (int)tf->blurBackground);
 	gs_texture_t *backgroundTexture = backgroundImageTexture ? backgroundImageTexture : blurredTexture;
 
 	if (!obs_source_process_filter_begin(tf->source, GS_RGBA, OBS_ALLOW_DIRECT_RENDERING)) {
@@ -992,12 +1023,17 @@ void background_filter_video_render(void *data, gs_effect_t *_effect)
 		gs_effect_set_texture(blurredBackground, backgroundTexture);
 	}
 
+	if (cameraBlurTexture) {
+		gs_effect_set_texture(gs_effect_get_param_by_name(tf->effect, "cameraBlur"), cameraBlurTexture);
+		gs_effect_set_float(gs_effect_get_param_by_name(tf->effect, "edgeBlur"), tf->backgroundEdgeBlur);
+	}
+
 	gs_blend_state_push();
 	gs_reset_blend_state();
 
 	const char *techName;
 	if (backgroundImageTexture) {
-		techName = "DrawWithImage";
+		techName = cameraBlurTexture ? "DrawWithImageEdge" : "DrawWithImage";
 	} else if (blurredTexture) {
 		techName = "DrawWithBlur";
 	} else {

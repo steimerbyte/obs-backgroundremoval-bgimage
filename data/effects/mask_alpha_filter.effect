@@ -8,6 +8,8 @@ uniform float4x4 ViewProj;
 uniform texture2d image;     // input RGBA
 uniform texture2d alphamask; // alpha mask
 uniform texture2d blurredBackground; // input RGBA
+uniform texture2d cameraBlur;        // blurred input RGBA, used on the background side of the edge
+uniform float edgeBlur;              // 0 = sharp input everywhere
 
 sampler_state textureSampler {
 	Filter    = Linear;
@@ -41,6 +43,23 @@ float4 PSAlphaMaskRGBAWithBlur(VertDataOut v_in) : TARGET
 	float4 outputRGBA;
 	float a = (1.0 - alphamask.Sample(textureSampler, v_in.uv).r) * inputRGBA.a;
 	outputRGBA.rgb = inputRGBA.rgb * a + blurredBackground.Sample(textureSampler, v_in.uv).rgb * (1.0 - a);
+	outputRGBA.a = 1;
+	return outputRGBA;
+}
+
+float4 PSAlphaMaskRGBAWithBlurEdge(VertDataOut v_in) : TARGET
+{
+	float4 inputRGBA = image.Sample(textureSampler, v_in.uv);
+	inputRGBA.rgb = max(float3(0.0, 0.0, 0.0), inputRGBA.rgb / inputRGBA.a);
+
+	float m = alphamask.Sample(textureSampler, v_in.uv).r;
+	float a = (1.0 - m) * inputRGBA.a;
+	// Blur the camera over the person half of the soft edge, so the seam at m = 0.5 is gone.
+	float edge = smoothstep(0.0, 0.5, m) * edgeBlur;
+	float3 cam = lerp(inputRGBA.rgb, cameraBlur.Sample(textureSampler, v_in.uv).rgb, edge);
+
+	float4 outputRGBA;
+	outputRGBA.rgb = cam * a + blurredBackground.Sample(textureSampler, v_in.uv).rgb * (1.0 - a);
 	outputRGBA.a = 1;
 	return outputRGBA;
 }
@@ -96,5 +115,14 @@ technique DrawWithImage
 	{
 		vertex_shader = VSDefault(v_in);
 		pixel_shader  = PSAlphaMaskRGBAWithBlur(v_in);
+	}
+}
+
+technique DrawWithImageEdge
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader  = PSAlphaMaskRGBAWithBlurEdge(v_in);
 	}
 }
