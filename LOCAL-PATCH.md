@@ -65,6 +65,54 @@ So a ring of the real room around the person is mostly `mask_expansion` (positiv
 to the slider's help text) and `contour_filter`; `threshold 1.0` and a large `feather` instead eat
 into the person.
 
+## Wie genau sitzt die Maske (gemessen, drei Szenen)
+
+Referenz ist die fotographische Silhouette: pro Scanzeile wird die 0.5-Kante der Maske mit der
+stärksten Schrittkante des Kamerabilds im Umkreis von +-25 px verglichen (Schrittkanten-Prüfung:
+Kontrast der 5-px-Mittelwerte >= 20 Stufen). Positiv = Maske liegt außerhalb der sichtbaren Kante,
+negativ = sie schneidet in die Person.
+
+| Einstellung | Median-Offset | Streuung (mean abs) | Szenen |
+|---|---|---|---|
+| Threshold 0.50, sonst neutral | -2.0 px | 8.6 px | Person am Schreibtisch, 1080p |
+| Threshold 0.50, sonst neutral | 0.0 px | 5.8 px | Person im Studio, 1080p |
+| Threshold 0.30 | +1.0 px | 5.8 px | Studio |
+| Threshold 0.70 | -2.0 px | 6.3 px | Studio |
+| `mask_expansion 30` | +8.0 px | 11.9 px | Schreibtisch (p90 +24 px) |
+| `contour_filter 0.25` | +14.3 px Fläche außen, 1.0 px innen | - | Schreibtisch |
+
+Der Threshold verschiebt die Kante um etwa 1 px pro 0.2: höher = weiter in die Person hinein.
+0.5 ist auf beiden Szenen die neutralste Einstellung, ein anderer Default wäre an eine Szene
+überangepasst.
+
+Sub-Pixel-Kante auf der zweiten Szene (Studio, 1920x1080): Übergangsband (0.1 < Kameraanteil < 0.9)
+25.983 px -> **0 px**; auf der Schreibtsich-Szene 25.492 -> 4.087 px.
+
+## Kosten je Einstellung, im laufenden OBS gemessen
+
+`averageFrameRenderTime` des Grafikthreads, 1920x1080, MediaPipe, Similarity-Check aus, je zwei
+A/B-Paare (Basis 29,5-32,6 ms; ohne den Filter 2-5 ms):
+
+| Einstellung | Kosten |
+|---|---|
+| `contour_filter 0.25` | +-1 ms (der Binärpfad spart den kubischen Upscale) |
+| `feather 1.0` | +5 ms |
+| `mask_expansion 30` | +4 ms |
+| `background_edge_feather 0.98` | +5 ms |
+
+## Zeitliche Stabilität (gemessen, verrauschtes Quellvideo, 6 Aufnahmen im Abstand von 200 ms)
+
+| Einstellung | wechselnde Kantenpixel pro Frame | Anteil an der Person |
+|---|---|---|
+| Sub-Pixel-Kante, temporal 0.0 | 6.493 | 1.70 % |
+| Sub-Pixel-Kante, temporal 0.85 (Default) | 5.783 | 1.51 % |
+| Binärpfad + `contour_filter 0.25` + `smooth_contour 1.0` | 4.636 | 1.18 % |
+
+Die binäre Kontur ist ruhiger, aber sie kostet das 26k-px-Übergangsband. Ein 3x3-Gauß auf der
+Wahrscheinlichkeit bei Modellauflösung (Idee: 0.5-Punkt bleibt, Rauschen weg) wurde gemessen und
+**verworfen**: er entspricht 22 px bei voller Auflösung, verschiebt die Kante um 3-4 px und senkt
+das Flackern nur um 11 % (6.494 -> 5.771 px). Blur bei Modellauflösung ist zu grob.
+
 ## Local patch: sub-pixel mask edge
 
 With a threshold the mask used to become binary at the model resolution (256x144 for MediaPipe) and
